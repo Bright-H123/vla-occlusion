@@ -76,6 +76,28 @@ SETTLE_SPEED = 0.01    # m/s
 CAM_RES = 128
 
 
+def corridor_clear(cubes: dict, goal, target: str) -> bool:
+    """True if the straight push from `target` to `goal`, including the staging point
+    behind the cube, passes no other cube. `cubes` maps colour -> (x, y[, yaw])."""
+    goal = np.asarray(goal[:2], float)
+    c = np.asarray(cubes[target][:2], float)
+    d = np.linalg.norm(goal - c)
+    if d < 1e-6:
+        return False
+    u = (goal - c) / d
+    pre = c - u * 0.07
+    if not (WS_X[0] - 0.05 <= pre[0] <= WS_X[1] + 0.05 and TCP_Y[0] <= pre[1] <= TCP_Y[1]):
+        return False
+    for n, p in cubes.items():
+        if n == target:
+            continue
+        p = np.asarray(p[:2], float)
+        t = np.clip(np.dot(p - pre, u), 0.0, np.linalg.norm(goal - pre))
+        if np.linalg.norm(p - (pre + t * u)) < CORRIDOR_HALF + CUBE_HALF:
+            return False
+    return True
+
+
 @dataclass
 class Info:
     target: str
@@ -244,42 +266,40 @@ class SelectPushEnv(gym.Env):
             d.qpos[:7] = np.clip(d.qpos[:7] + dq, self._jrange[:, 0], self._jrange[:, 1])
         return d.qpos[:7].copy()
 
-    def _place_objects(self) -> None:
+    def _place_objects(self) -> dict:
+        """Sample a layout in which the target's push corridor is clear."""
         rng = self.np_random
         names = list(COLOURS)
         for _ in range(500):
-            pts = [np.array([rng.uniform(*WS_X), rng.uniform(*WS_Y)]) for _ in names]
-            if min(np.linalg.norm(a - b) for i, a in enumerate(pts) for b in pts[i + 1:]) < MIN_OBJ_SEP:
+            pts = {n: np.array([rng.uniform(*WS_X), rng.uniform(*WS_Y)]) for n in names}
+            vals = list(pts.values())
+            if min(np.linalg.norm(a - b) for i, a in enumerate(vals) for b in vals[i + 1:]) < MIN_OBJ_SEP:
                 continue
             goal = np.array([rng.uniform(*WS_X), rng.uniform(*WS_Y)])
-            if min(np.linalg.norm(goal - p) for p in pts) < MIN_GOAL_SEP:
+            if min(np.linalg.norm(goal - p) for p in vals) < MIN_GOAL_SEP:
                 continue
-            c = pts[names.index(self.target)]
-            u = (goal - c) / np.linalg.norm(goal - c)
-            pre = c - u * 0.07
-            if not (WS_X[0] - 0.05 <= pre[0] <= WS_X[1] + 0.05 and TCP_Y[0] <= pre[1] <= TCP_Y[1]):
-                continue
-            # the target's push corridor, including the approach point, must be clear
-            clear = True
-            for n, p in zip(names, pts):
-                if n == self.target:
-                    continue
-                t = np.clip(np.dot(p - pre, u), 0.0, np.linalg.norm(goal - pre))
-                if np.linalg.norm(p - (pre + t * u)) < CORRIDOR_HALF + CUBE_HALF:
-                    clear = False
-                    break
-            if clear:
+            if corridor_clear(pts, goal, self.target):
                 break
         else:
             raise RuntimeError("could not sample a valid layout in 500 tries")
+        return {"cubes": {n: [float(p[0]), float(p[1]), float(rng.uniform(-np.pi, np.pi))]
+                          for n, p in pts.items()},
+                "goal": [float(goal[0]), float(goal[1])]}
 
-        for n, p in zip(names, pts):
-            self._set_cube(n, p, rng.uniform(-np.pi, np.pi))
+    def _apply_layout(self, layout: dict) -> None:
+        for n, (x, y, yaw) in layout["cubes"].items():
+            self._set_cube(n, np.array([x, y]), yaw)
         if not self.distractors:
-            for n in names:
+            for n in COLOURS:
                 if n != self.target:
                     self._park_cube(n)
-        self.data.mocap_pos[self._goal_mocap][:2] = goal
+        self.data.mocap_pos[self._goal_mocap][:2] = layout["goal"]
+        self._layout = layout
+
+    def get_layout(self) -> dict:
+        """The initial layout of the current episode, reusable via reset(options={'layout': ...})."""
+        return {"cubes": {n: list(v) for n, v in self._layout["cubes"].items()},
+                "goal": list(self._layout["goal"])}
 
     def _set_colours(self, masked: bool) -> None:
         for name, (_, _, _, gid) in self._cube.items():
@@ -306,7 +326,9 @@ class SelectPushEnv(gym.Env):
         self.instruction = options.get("instruction") or tpl.format(c=self.target)
 
         self._set_colours(masked=False)
-        self._place_objects()
+        # options["layout"] reproduces an earlier episode's initial state exactly, which
+        # is what the swapped-instruction condition needs: same scene, different command
+        self._apply_layout(options.get("layout") or self._place_objects())
         mujoco.mj_forward(m, d)
 
         # start the pusher above the bench, clear of every cube
