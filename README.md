@@ -18,8 +18,9 @@ uses the instruction, and whether it still does once the target leaves view.
 **What this does**
 
 - A self-built MJCF scene (Gymnasium wrapper) with randomised object layout,
-  randomised colour-to-position assignment, and an occluder that passes between
-  the camera and the workspace mid-episode.
+  randomised colour-to-position assignment, and an occluder panel that moves onto
+  the line between the front camera and the bench mid-episode. The panel is visual
+  only (no collision), so it removes the observation without changing the physics.
 - A scripted end-effector expert that solves the task from privileged state, used
   to generate demonstrations automatically. No human teleoperation.
 - Fine-tuning of the **action expert** of SmolVLA-450M on those demonstrations.
@@ -61,6 +62,20 @@ That is the point of including it.
 Condition (d) is the one this project exists for. SmolVLA has no explicit memory,
 so a drop here is the expected result rather than a failure, and it is the
 minimal case that motivates memory-conditioned policies.
+
+**How (d) is implemented.** `SelectPushEnv(occlude_at=t0, occlude_steps=k)` moves a
+grey panel onto the front camera's line of sight for steps `t0 <= t < t0 + k`, then
+parks it outside the view again. Measured on seed 7 by differencing identical
+episodes with and without the panel: it changes 93.8% of the 128x128 front frame,
+and the pixel count of every cube colour drops to 0 while it is in place (red 92,
+green 28, blue 14 pixels before). It is built for the default `front` camera; on
+the `top` camera it changes only 13% of the frame, so (d) is only defined for
+`front`. `info["occluded"]` reports the state at every step.
+
+A weaker variant, `mask_colour_at=t`, keeps the cubes visible but recolours all
+three grey. It removes identity and keeps geometry, whereas the panel removes
+both, so the two together separate "lost track of which cube" from "lost sight
+of the scene".
 
 ## Results
 

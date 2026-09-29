@@ -4,7 +4,11 @@ The gate is 90 successes out of 100. Below 80 the plan says stop tuning physics
 and fall back (see the kill criteria), so the exact count matters and is written
 into docs/day2_expert.md.
 
-Run:  python scripts/run_expert.py --n 100 --gif 3
+Run:  python scripts/run_expert.py --n 100 --gif 3 --record
+
+Without --record nothing is written. The record is rewritten as a whole and
+null_controls.py appends to it, so a quick check such as --n 20 must not be
+allowed to replace the 100-episode gate and drop the null-control table.
 """
 
 from __future__ import annotations
@@ -52,6 +56,8 @@ def main() -> int:
     ap.add_argument("--seed0", type=int, default=1000)
     ap.add_argument("--gif", type=int, default=0, help="save GIFs of the first K episodes")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--record", action="store_true",
+                    help="rewrite docs/day2_expert.md; only for the full gate run")
     args = ap.parse_args()
 
     env = SelectPushEnv()
@@ -95,6 +101,8 @@ def main() -> int:
     gate = "PASS" if k >= 90 * args.n / 100 else ("FALLBACK" if k < 80 * args.n / 100 else "BELOW TARGET")
     print(f"Day 2 gate (>=90/100): {gate}")
 
+    if not args.record:
+        return 0
     (REPO / "docs" / "day2_expert.md").write_text(
         "\n".join([
             "# Day 2 — scripted expert gate",

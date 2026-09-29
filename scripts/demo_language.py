@@ -1,6 +1,6 @@
 """Same scene, three instructions.
 
-Finds a layout in which every cube has a clear push corridor, then runs the
+Finds a layout in which every cube has a clear push lane, then runs the
 scripted expert three times from that identical initial state, once per
 instruction. The three panels differ only in the instruction.
 
@@ -24,7 +24,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from envs.expert import PushExpert  # noqa: E402
-from envs.select_push import COLOURS, TEMPLATES, SelectPushEnv, corridor_clear  # noqa: E402
+from envs.select_push import COLOURS, TEMPLATES, SelectPushEnv, lane_clear  # noqa: E402
 
 RES = 224
 CAPTION_H = 46
@@ -46,9 +46,9 @@ def find_shared_layout(env: SelectPushEnv, seed0: int = 2000) -> tuple[int, dict
     for s in range(seed0, seed0 + 2000):
         env.reset(seed=s, options={"target": "red"})
         lay = env.get_layout()
-        if all(corridor_clear(lay["cubes"], lay["goal"], t) for t in COLOURS):
+        if all(lane_clear(lay["cubes"], lay["goal"], t) for t in COLOURS):
             return s, lay
-    raise RuntimeError("no layout with three clear corridors in 2000 seeds")
+    raise RuntimeError("no layout with three clear lanes in 2000 seeds")
 
 
 def main() -> int:

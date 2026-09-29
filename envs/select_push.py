@@ -41,6 +41,13 @@ COLOURS = {
 }
 MASK_RGBA = (0.55, 0.55, 0.55, 1.0)  # used when the colour cue is removed
 
+# Occluder: a visual-only panel on the line between the front camera and the bench.
+# It has contype=conaffinity=0, so it never touches the arm or the cubes; it removes
+# the observation without perturbing the physics. Parked far outside both views.
+OCCLUDER_POS = (0.79, 0.0, 0.30)
+OCCLUDER_HALF = (0.008, 0.20, 0.20)
+OCCLUDER_PARK_Y = -1.2
+
 TEMPLATES = [
     "push the {c} cube to the goal",
     "move the {c} block onto the target",
@@ -56,7 +63,7 @@ WS_X = (0.45, 0.66)
 WS_Y = (-0.17, 0.17)
 MIN_OBJ_SEP = 0.10     # between cube centres
 MIN_GOAL_SEP = 0.12    # goal centre to any cube centre
-CORRIDOR_HALF = 0.055  # clear half-width around the target's push line
+LANE_HALF = 0.055  # clear half-width around the target's push line
 
 # -------------------------------------------------------------------------- control
 CONTROL_HZ = 20
@@ -76,7 +83,7 @@ SETTLE_SPEED = 0.01    # m/s
 CAM_RES = 128
 
 
-def corridor_clear(cubes: dict, goal, target: str) -> bool:
+def lane_clear(cubes: dict, goal, target: str) -> bool:
     """True if the straight push from `target` to `goal`, including the staging point
     behind the cube, passes no other cube. `cubes` maps colour -> (x, y[, yaw])."""
     goal = np.asarray(goal[:2], float)
@@ -93,7 +100,7 @@ def corridor_clear(cubes: dict, goal, target: str) -> bool:
             continue
         p = np.asarray(p[:2], float)
         t = np.clip(np.dot(p - pre, u), 0.0, np.linalg.norm(goal - pre))
-        if np.linalg.norm(p - (pre + t * u)) < CORRIDOR_HALF + CUBE_HALF:
+        if np.linalg.norm(p - (pre + t * u)) < LANE_HALF + CUBE_HALF:
             return False
     return True
 
@@ -106,6 +113,7 @@ class Info:
     wrong_cube_on_goal: bool
     out_of_bounds: bool
     masked: bool
+    occluded: bool
 
 
 def _build_model() -> mujoco.MjModel:
@@ -160,6 +168,12 @@ def _build_model() -> mujoco.MjModel:
                   friction=[0.3, 0.005, 0.0001])
     hand.add_site(name="tcp", pos=[0, 0, TCP_OFFSET], size=[0.004, 0, 0])
 
+    occ = wb.add_body(name="occluder", pos=[OCCLUDER_POS[0], OCCLUDER_PARK_Y, OCCLUDER_POS[2]],
+                      mocap=True)
+    occ.add_geom(name="occluder_panel", type=mujoco.mjtGeom.mjGEOM_BOX,
+                 size=list(OCCLUDER_HALF), rgba=[0.30, 0.31, 0.33, 1],
+                 contype=0, conaffinity=0)
+
     wb.add_camera(name="top", pos=[0.585, 0.0, 0.78],
                   xyaxes=[0, -1, 0, 1, 0, 0], fovy=40)
     # front camera on the far side of the bench, looking back at the robot, so the
@@ -174,6 +188,7 @@ class SelectPushEnv(gym.Env):
 
     def __init__(self, render_mode: str | None = "rgb_array",
                  distractors: bool = True, mask_colour_at: int | None = None,
+                 occlude_at: int | None = None, occlude_steps: int = 30,
                  resolution: int = CAM_RES, camera: str = "front"):
         super().__init__()
         self.model = _build_model()
@@ -182,6 +197,8 @@ class SelectPushEnv(gym.Env):
         self.render_mode = render_mode
         self.distractors = distractors
         self.mask_colour_at = mask_colour_at
+        self.occlude_at = occlude_at
+        self.occlude_steps = occlude_steps
         self.res = resolution
         self.camera = camera
         self._renderer = mujoco.Renderer(self.model, height=resolution, width=resolution)
@@ -192,6 +209,7 @@ class SelectPushEnv(gym.Env):
         self._tcp = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, "tcp")
         self._pusher = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "pusher")
         self._goal_mocap = m.body_mocapid[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "goal")]
+        self._occ_mocap = m.body_mocapid[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "occluder")]
         self._arm_dofs = np.arange(7)
         self._jrange = m.jnt_range[:7].copy()
 
@@ -267,7 +285,7 @@ class SelectPushEnv(gym.Env):
         return d.qpos[:7].copy()
 
     def _place_objects(self) -> dict:
-        """Sample a layout in which the target's push corridor is clear."""
+        """Sample a layout in which the target's push lane is clear."""
         rng = self.np_random
         names = list(COLOURS)
         for _ in range(500):
@@ -278,7 +296,7 @@ class SelectPushEnv(gym.Env):
             goal = np.array([rng.uniform(*WS_X), rng.uniform(*WS_Y)])
             if min(np.linalg.norm(goal - p) for p in vals) < MIN_GOAL_SEP:
                 continue
-            if corridor_clear(pts, goal, self.target):
+            if lane_clear(pts, goal, self.target):
                 break
         else:
             raise RuntimeError("could not sample a valid layout in 500 tries")
@@ -300,6 +318,12 @@ class SelectPushEnv(gym.Env):
         """The initial layout of the current episode, reusable via reset(options={'layout': ...})."""
         return {"cubes": {n: list(v) for n, v in self._layout["cubes"].items()},
                 "goal": list(self._layout["goal"])}
+
+    def _set_occluder(self, blocking: bool) -> None:
+        """Slide the panel onto the camera axis, or park it far outside every view."""
+        y = OCCLUDER_POS[1] if blocking else OCCLUDER_PARK_Y
+        self.data.mocap_pos[self._occ_mocap] = [OCCLUDER_POS[0], y, OCCLUDER_POS[2]]
+        self._occluded = blocking
 
     def _set_colours(self, masked: bool) -> None:
         for name, (_, _, _, gid) in self._cube.items():
@@ -344,6 +368,8 @@ class SelectPushEnv(gym.Env):
         self.t = 0
         self._settled = 0
         self._masked = False
+        self._set_colours(masked=False)
+        self._set_occluder(blocking=False)
         return self._obs(), {"target": self.target}
 
     def step(self, action):
@@ -362,6 +388,8 @@ class SelectPushEnv(gym.Env):
         if self.mask_colour_at is not None and self.t == self.mask_colour_at:
             self._set_colours(masked=True)
             self._masked = True
+        if self.occlude_at is not None:
+            self._set_occluder(self.occlude_at <= self.t < self.occlude_at + self.occlude_steps)
 
         g = self.goal_xy()
         dist = float(np.linalg.norm(self.cube_xy(self.target) - g))
@@ -377,7 +405,7 @@ class SelectPushEnv(gym.Env):
 
         terminated = success
         truncated = self.t >= EPISODE_STEPS
-        info = Info(self.target, success, dist, wrong, oob, self._masked).__dict__
+        info = Info(self.target, success, dist, wrong, oob, self._masked, self._occluded).__dict__
         return self._obs(), float(success), terminated, truncated, info
 
     def render(self):
