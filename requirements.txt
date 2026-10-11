@@ -1,0 +1,13 @@
+# the scene and expert need only these two
+mujoco==3.14.0
+gymnasium>=0.29
+numpy>=2.0,<2.3
+imageio>=2.34
+
+# recording, training and evaluating policies additionally need LeRobot.
+# numpy is capped above because lerobot 0.6.1 pins numpy<2.3; mujoco does not
+# pin numpy, so 2.2.6 satisfies both. torch must be the CUDA build: a plain
+# `pip install torch` silently gives the CPU wheel on Windows.
+#   pip install "torch==2.11.0+cu126" "torchvision==0.26.0+cu126" \
+#       --extra-index-url https://download.pytorch.org/whl/cu126
+#   pip install "lerobot[smolvla,training]==0.6.1"
