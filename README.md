@@ -16,8 +16,6 @@ uses the instruction, and whether it still does once the target leaves view.
 > uses the instruction, so the policy row of the results table is deliberately
 > empty rather than filled with numbers from an undertrained model.
 >
-> Built with AI assistance. The experimental design, the controls and every
-> reported number are mine.
 > Nothing in this README is reported until the code that produces it is in this
 > repository.
 
